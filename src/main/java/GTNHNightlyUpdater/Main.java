@@ -22,6 +22,18 @@ public class Main {
                     .setCaseInsensitiveEnumValuesAllowed(true)
                     .parseArgs(args);
 
+            // Stable updates use the official GTNH zip packs and a different flow
+            if (options.targetManifest == Options.TargetManifest.STABLE) {
+                val cacheDirBase = getCacheDir();
+                val cacheDir = cacheDirBase.resolve("gtnh-stable-updater");
+                if (Files.notExists(cacheDir)) {
+                    Files.createDirectory(cacheDir);
+                }
+                log.info("Running STABLE updater using official GTNH zip packs");
+                new StableUpdater(options).run(cacheDir);
+                return;
+            }
+
             val updater = new Updater(options);
             val cacheDir = getCacheDir().resolve("gtnh-nightly-updater");
             if (Files.notExists(cacheDir)) {
@@ -112,7 +124,12 @@ public class Main {
 
         enum TargetManifest {
             EXPERIMENTAL,
-            DAILY;
+            DAILY,
+            /**
+             * Uses the latest stable GTNH zip packs from downloads.gtnewhorizons.com
+             * instead of the DreamAssemblerXXL manifests.
+             */
+            STABLE;
         }
 
         @CommandLine.Option(names = {"-M", "--target-manifest"}, required = true, description = "Which manifest to use as source of mod versions.; Valid values: ${COMPLETION-CANDIDATES}")
