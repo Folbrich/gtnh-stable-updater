@@ -12,6 +12,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -139,9 +141,23 @@ public class StableUpdater {
                     log.error("No stable Prism/MultiMC client pack available; skipping {}", targetDir);
                     continue;
                 }
-                log.info("Updating CLIENT instance at {}", targetDir);
-                updateClientInstance(targetDir, multiMcRoot);
-                log.info("Finished updating CLIENT instance at {}", targetDir);
+                // enforce that the path really is a .minecraft folder as requested
+                if (!targetDir.getFileName().toString().equals(".minecraft")) {
+                    throw new IllegalArgumentException(String.format(
+                            "For STABLE client updates the --minecraft path must point to a '.minecraft' folder, but got: '%s'",
+                            targetDir
+                    ));
+                }
+
+                if (options.replace) {
+                    log.info("Updating CLIENT instance at {} in REPLACE mode (Method 2: Direct Update).", targetDir);
+                    updateClientInstanceInPlace(targetDir, multiMcRoot);
+                    log.info("Finished updating CLIENT instance at {} (REPLACE mode).", targetDir);
+                } else {
+                    log.info("Updating CLIENT instance at {} in MIGRATION mode (Method 1: Migrating).", targetDir);
+                    migrateClientInstance(targetDir, multiMcRoot, multiMcPack.version());
+                    log.info("Finished updating CLIENT instance at {} (MIGRATION mode).", targetDir);
+                }
             } else if (side == Main.Options.Instance.InstanceConfig.Side.SERVER) {
                 if (serverRoot == null) {
                     log.error("No stable server pack available; skipping {}", targetDir);
@@ -250,7 +266,10 @@ public class StableUpdater {
         }
     }
 
-    private void updateClientInstance(Path instanceDir, Path packMinecraftRoot) throws IOException {
+    /**
+     * In-place update of an existing client instance (\"Method 2: Direct Update\" from the GTNH wiki).
+     */
+    private void updateClientInstanceInPlace(Path instanceDir, Path packMinecraftRoot) throws IOException {
         // Follow "Method 2: Direct Update" from the GTNH wiki (Installing and Migrating).
         // 1) Replace inside .minecraft: mods, config, serverutilities, scripts, resources
         copyDirectoryFromPack(packMinecraftRoot, instanceDir, "mods");
@@ -269,7 +288,7 @@ public class StableUpdater {
             invalidatePrismPackCache(instanceRoot);
         }
 
-        log.info("Client update done at {}. User files like saves, journeymap, resourcepacks etc. were left untouched.", instanceDir);
+        log.info("Client update (in-place) done at {}. User files like saves, journeymap, resourcepacks etc. were left untouched.", instanceDir);
         log.info("If the game still crashes with Pack200/ClassNotFoundException: In Prism Launcher use Edit Instance -> Version -> Reload, or create a new instance by importing the latest GTNH zip and copy your saves into it.");
     }
 
@@ -295,6 +314,110 @@ public class StableUpdater {
                     log.warn("Could not delete pack cache {}: {}", p, e.getMessage());
                 }
             }
+        }
+    }
+
+    /**
+     * Create a new instance based on the latest stable pack and copy user data from the source
+     * instance's .minecraft (\"Method 1: Migrating\" from the GTNH wiki).
+     *
+     * The original instance (sourceMinecraftDir) is left untouched as an additional backup.
+     */
+    private void migrateClientInstance(Path sourceMinecraftDir, Path packMinecraftRoot, String stableVersion) throws IOException {
+        // sourceMinecraftDir is the existing .minecraft folder
+        Path sourceInstanceRoot = sourceMinecraftDir.getParent();
+        if (sourceInstanceRoot == null) {
+            throw new IOException("Unable to determine instance root for " + sourceMinecraftDir);
+        }
+
+        Path packInstanceRoot = packMinecraftRoot.getParent();
+        if (packInstanceRoot == null) {
+            throw new IOException("Unable to determine instance root in extracted pack for " + packMinecraftRoot);
+        }
+
+        String baseName = sourceInstanceRoot.getFileName().toString();
+        String safeVersion = stableVersion.replaceAll("[^0-9A-Za-z._-]", "_");
+        Path instancesParent = sourceInstanceRoot.getParent();
+        if (instancesParent == null) {
+            throw new IOException("Unable to determine parent for instance root " + sourceInstanceRoot);
+        }
+
+        Path newInstanceRoot = instancesParent.resolve(baseName + "_gtnh_" + safeVersion);
+        if (Files.exists(newInstanceRoot)) {
+            throw new IOException("Target instance directory already exists: " + newInstanceRoot);
+        }
+
+        log.info("Creating new instance at {} based on stable pack (version {}).", newInstanceRoot, stableVersion);
+        FileUtils.copyDirectory(packInstanceRoot.toFile(), newInstanceRoot.toFile());
+
+        Path newMinecraftDir = newInstanceRoot.resolve(".minecraft");
+        if (Files.notExists(newMinecraftDir) || !Files.isDirectory(newMinecraftDir)) {
+            throw new IOException("New instance does not contain a .minecraft directory at " + newMinecraftDir);
+        }
+
+        // Copy user data from old .minecraft to new .minecraft (Method 1 from wiki)
+        copyUserDataForMethod1(sourceMinecraftDir, newMinecraftDir);
+
+        log.info("Migration complete. Original instance kept at: {}", sourceMinecraftDir);
+        log.info("New migrated instance created at: {}", newInstanceRoot);
+        log.info("You can now add/import '{}' as a new instance in Prism/MultiMC and use it for GTNH {}.", newInstanceRoot, stableVersion);
+    }
+
+    /**
+     * Copy user data from source .minecraft to target .minecraft following the GTNH wiki
+     * \"Method 1: Migrating\" list.
+     */
+    private void copyUserDataForMethod1(Path sourceMinecraftDir, Path targetMinecraftDir) throws IOException {
+        // Directories to carry over
+        String[] dirs = new String[]{
+                "saves",
+                "backups",
+                "journeymap",
+                "visualprospecting",
+                "TCNodeTracker",
+                "schematics",
+                "resourcepacks",
+                "shaderpacks"
+        };
+
+        for (String dir : dirs) {
+            Path src = sourceMinecraftDir.resolve(dir);
+            if (Files.exists(src) && Files.isDirectory(src)) {
+                Path dest = targetMinecraftDir.resolve(dir);
+                if (Files.exists(dest)) {
+                    FileUtils.deleteDirectory(dest.toFile());
+                }
+                log.info("Copying user directory {} -> {}", src, dest);
+                FileUtils.copyDirectory(src.toFile(), dest.toFile());
+            }
+        }
+
+        // Files to carry over (top-level)
+        String[] files = new String[]{
+                "localconfig.cfg",
+                "BotaniaVars.dat",
+                "options.txt",
+                "optionsnf.txt",
+                "servers.dat"
+        };
+
+        for (String file : files) {
+            Path src = sourceMinecraftDir.resolve(file);
+            if (Files.exists(src) && Files.isRegularFile(src)) {
+                Path dest = targetMinecraftDir.resolve(file);
+                log.info("Copying user file {} -> {}", src, dest);
+                Files.createDirectories(dest.getParent());
+                Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+            }
+        }
+
+        // Special case: config/shaders.properties
+        Path srcShaders = sourceMinecraftDir.resolve("config").resolve("shaders.properties");
+        if (Files.exists(srcShaders) && Files.isRegularFile(srcShaders)) {
+            Path destShaders = targetMinecraftDir.resolve("config").resolve("shaders.properties");
+            log.info("Copying user file {} -> {}", srcShaders, destShaders);
+            Files.createDirectories(destShaders.getParent());
+            Files.copy(srcShaders, destShaders, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
         }
     }
 
@@ -370,38 +493,37 @@ public class StableUpdater {
     }
 
     /**
-     * Secure zip extraction, adapted from the existing updater implementation.
+     * Secure zip extraction using the JDK Zip FileSystem. This mirrors the full contents
+     * of the GTNH zip (including all files and directories) into {@code targetDir}.
      */
     private void extractZip(Path zipPath, Path targetDir) throws IOException {
         if (!Files.exists(targetDir)) {
             Files.createDirectories(targetDir);
         }
 
-        try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipPath))) {
-            ZipEntry entry;
+        // Mount the zip as a FileSystem and copy everything 1:1
+        try (FileSystem zipFs = FileSystems.newFileSystem(zipPath, (ClassLoader) null)) {
+            for (Path root : zipFs.getRootDirectories()) {
+                try (Stream<Path> stream = Files.walk(root)) {
+                    stream.forEach(src -> {
+                        try {
+                            Path rel = root.relativize(src);
+                            if (rel.toString().isEmpty()) {
+                                return; // skip root itself
+                            }
+                            Path dest = targetDir.resolve(rel.toString());
 
-            while ((entry = zis.getNextEntry()) != null) {
-                Path resolvedPath = targetDir.resolve(entry.getName()).normalize();
-
-                // Prevent Zip Slip vulnerability
-                if (!resolvedPath.startsWith(targetDir)) {
-                    throw new IOException("Entry is outside the target dir: " + entry.getName());
+                            if (Files.isDirectory(src)) {
+                                Files.createDirectories(dest);
+                            } else {
+                                Files.createDirectories(dest.getParent());
+                                Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+                            }
+                        } catch (IOException e) {
+                            throw new RuntimeException("Failed to extract entry from zip: " + src, e);
+                        }
+                    });
                 }
-
-                if (entry.isDirectory()) {
-                    if (Files.exists(resolvedPath)) {
-                        FileUtils.deleteDirectory(resolvedPath.toFile());
-                    }
-                    Files.createDirectories(resolvedPath);
-                } else {
-                    if (!Files.exists(resolvedPath.getParent())) {
-                        Files.createDirectories(resolvedPath.getParent());
-                    }
-
-                    Files.copy(zis, resolvedPath, StandardCopyOption.REPLACE_EXISTING);
-                }
-
-                zis.closeEntry();
             }
         }
     }

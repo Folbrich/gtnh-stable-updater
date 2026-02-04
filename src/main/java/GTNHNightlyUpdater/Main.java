@@ -149,6 +149,14 @@ public class Main {
         @CommandLine.Option(names = {"-c", "--configs"}, description = "Update configs in addition to mods")
         protected boolean updateConfigs = false;
 
+        @CommandLine.Option(names = {"--replace"}, description = {
+                "For STABLE updates only:",
+                "  - When set, update the given instance in-place (\"Method 2: Direct Update\" from the GTNH wiki).",
+                "  - Without this flag, STABLE will create a new instance folder based on the latest stable pack",
+                "    (\"Method 1: Migrating\" style) and copy your saves/user data there, leaving the original as backup."
+        })
+        protected boolean replace = false;
+
         @CommandLine.ArgGroup(exclusive = false, multiplicity = "1..*")
         protected List<Instance> instances;
 
