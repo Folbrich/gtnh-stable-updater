@@ -422,21 +422,66 @@ public class StableUpdater {
     }
 
     private void updateServerInstance(Path serverDir, Path packRoot) throws IOException {
-        // Delete and replace key modpack directories from the new server pack.
+        // Ensure local server cache directory exists
+        Path localCache = serverDir.resolve(".cache");
+        if (!Files.exists(localCache)) {
+            Files.createDirectories(localCache);
+            log.info("Created server local cache directory {}", localCache);
+        }
+
+        // Backup JourneyMapServer folder from config before deleting configs
+        Path jmSource = serverDir.resolve("config").resolve("JourneyMapServer");
+        Path jmBackup = localCache.resolve("JourneyMapServer");
+        if (Files.exists(jmSource) && Files.isDirectory(jmSource)) {
+            if (Files.exists(jmBackup)) {
+                FileUtils.deleteDirectory(jmBackup.toFile());
+            }
+            log.info("Backing up JourneyMapServer from {} to {}", jmSource, jmBackup);
+            FileUtils.copyDirectory(jmSource.toFile(), jmBackup.toFile());
+        }
+
+        // Delete and replace key modpack directories from the new server pack, as per GTNH server update guide.
+        // Delete from serverDir regardless; only copy back if present in packRoot so removed folders stay removed.
         String[] dirsToUpdate = new String[]{
                 "mods",
                 "config",
                 "scripts",
                 "resources",
-                "libraries",
-                "serverutilities"
+                "libraries"
         };
 
         for (String dir : dirsToUpdate) {
-            copyDirectoryFromPack(packRoot, serverDir, dir);
+            Path dest = serverDir.resolve(dir);
+            if (Files.exists(dest)) {
+                log.info("Deleting existing server directory {}", dest);
+                FileUtils.deleteDirectory(dest.toFile());
+            }
+
+            Path src = packRoot.resolve(dir);
+            if (Files.exists(src) && Files.isDirectory(src)) {
+                log.info("Copying server directory {} -> {}", src, dest);
+                FileUtils.copyDirectory(src.toFile(), dest.toFile());
+            } else {
+                log.debug("Server pack does not contain '{}', leaving it absent in target.", dir);
+            }
         }
 
-        // Also update main jars and start scripts in the server root (but keep world/backups/etc. intact).
+        // For Java 17+ servers remove these files from server root, then replace them with the ones from the pack
+        String[] filesToRemove = new String[]{
+                "lwjgl3ify-forgePatches.jar",
+                "java9args.txt",
+                "startserver-java9.bat",
+                "startserver-java9.sh"
+        };
+        for (String file : filesToRemove) {
+            Path f = serverDir.resolve(file);
+            if (Files.exists(f)) {
+                log.info("Deleting server root file {}", f);
+                Files.delete(f);
+            }
+        }
+
+        // Copy main jars and start scripts from the server pack root (but keep world/backups/etc. intact).
         try (Stream<Path> stream = Files.list(packRoot)) {
             stream
                     .filter(Files::isRegularFile)
@@ -461,7 +506,17 @@ public class StableUpdater {
                     });
         }
 
-        log.info("Server update done at {}. World folders, backups and other custom data were left untouched.", serverDir);
+        // Restore JourneyMapServer folder into the new config
+        if (Files.exists(jmBackup) && Files.isDirectory(jmBackup)) {
+            Path dest = serverDir.resolve("config").resolve("JourneyMapServer");
+            if (Files.exists(dest)) {
+                FileUtils.deleteDirectory(dest.toFile());
+            }
+            log.info("Restoring JourneyMapServer from backup {} -> {}", jmBackup, dest);
+            FileUtils.copyDirectory(jmBackup.toFile(), dest.toFile());
+        }
+
+        log.info("Server update done at {}. World folders, backups and other custom data (including JourneyMapServer UUID) were left untouched.", serverDir);
     }
 
     private void copyDirectoryFromPack(Path packRoot, Path targetRoot, String directoryName) throws IOException {
