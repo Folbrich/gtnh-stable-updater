@@ -47,6 +47,12 @@ Stable updates use the **official GTNH zip packs** from
 `https://downloads.gtnewhorizons.com` and follow the GTNH Wiki  
 **“Installing and Migrating”** guidelines.
 
+The latest version is determined by parsing the official  
+[GTNH version history page](https://www.gtnewhorizons.com/version-history/), which lists every  
+release (stable, beta and RC) newest-first. By default only entries tagged **"Stable release"**  
+are considered; pass `--beta` to also allow the latest beta/RC, or `--stable-version <version>`  
+to pin to an exact version (stable or beta) from that page.
+
 Two modes are supported:
 
 ### Method 1 – Migration (default)
@@ -78,6 +84,8 @@ This matches **Method 2** from the GTNH Wiki.
 |------|-------------|
 | `-M, --target-manifest` | **Required** Specify which release to update to the latest version of `DAILY`, `EXPERIMENTAL`, or `STABLE` |
 | `--replace` | **Optional - Stable only** Perform an in-place update |
+| `--beta` | **Optional - Stable only** Allow the latest release to be a beta/RC build, not just entries tagged "Stable release" |
+| `--stable-version` | **Optional - Stable only** Pin to an exact version from the [version history page](https://www.gtnewhorizons.com/version-history/) (e.g. `2.9.0-beta-2`), overriding `--beta` |
 | `--get-latest` | **Optional - Nightly only** Query the GTNH maven for the latest version of a mod before its in the next daily/experimental (**DANGER**) |
 | `-c, --configs` | **Optional - Nightly only** Update configs in addition to mods (based off target manifest) |
 | `-C, --only-configs` | **Optional - Nightly only** Only update configs (based off target manifest) |
@@ -110,6 +118,20 @@ java -jar gtnh-nightly-updater.jar -M STABLE \
 
 ```bash
 java -jar gtnh-nightly-updater.jar -M STABLE --replace \
+  --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH/.minecraft/"
+```
+
+### Stable – Latest Beta/RC
+
+```bash
+java -jar gtnh-nightly-updater.jar -M STABLE --replace --beta \
+  --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH/.minecraft/"
+```
+
+### Stable – Pin an exact version
+
+```bash
+java -jar gtnh-nightly-updater.jar -M STABLE --replace --stable-version 2.9.0-beta-2 \
   --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH/.minecraft/"
 ```
 

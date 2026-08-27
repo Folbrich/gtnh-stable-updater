@@ -5,7 +5,10 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
 import lombok.val;
 import org.apache.commons.io.FileUtils;
-import org.apache.maven.artifact.versioning.DefaultArtifactVersion;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.select.Elements;
 
 import java.io.IOException;
 import java.net.URI;
@@ -17,12 +20,12 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 /**
  * Handles updating GTNH instances to the latest stable release using the official zip packs
@@ -44,15 +47,23 @@ import java.util.zip.ZipInputStream;
 @RequiredArgsConstructor
 public class StableUpdater {
 
-    private static final String MULTI_MC_BASE = "https://downloads.gtnewhorizons.com/Multi_mc_downloads/";
-    private static final String SERVER_PACKS_BASE = "https://downloads.gtnewhorizons.com/ServerPacks/";
+    /**
+     * The old Apache-style directory listings ({@code Multi_mc_downloads/?raw} / {@code ServerPacks/?raw})
+     * that used to be scraped for the latest version now return HTTP 404. GTNH's downloads moved to
+     * https://www.gtnewhorizons.com/downloads/, and the full release list (including betas/RCs) lives at
+     * the version history page below, which is parsed instead.
+     */
+    private static final String VERSION_HISTORY_URL = "https://www.gtnewhorizons.com/version-history/";
 
-    /** Matches Prism/MultiMC client zips: e.g. GT_New_Horizons_2.8.4_Java_17-25.zip */
-    private static final Pattern MULTI_MC_STABLE_PATTERN =
-            Pattern.compile("GT_New_Horizons_(\\d+\\.\\d+\\.\\d+)_Java_17-\\d+\\.zip");
-    /** Matches server zips: e.g. GT_New_Horizons_2.8.4_Server_Java_17-25.zip */
-    private static final Pattern SERVER_STABLE_PATTERN =
-            Pattern.compile("GT_New_Horizons_(\\d+\\.\\d+\\.\\d+)_Server_Java_17-\\d+\\.zip");
+    /** Matches Prism/MultiMC client zips for Java 17+: e.g. .../Multi_mc_downloads/betas/GT_New_Horizons_2.9.0-beta-2_Java_17-25.zip */
+    private static final Pattern MULTI_MC_JAVA17_PATTERN =
+            Pattern.compile("Multi_mc_downloads/.*_Java_17-\\d+\\.zip$");
+    /** Matches server zips for Java 17+: e.g. .../ServerPacks/betas/GT_New_Horizons_2.9.0-beta-2_Server_Java_17-25.zip */
+    private static final Pattern SERVER_JAVA17_PATTERN =
+            Pattern.compile("ServerPacks/.*_Server_Java_17-\\d+\\.zip$");
+    /** A release heading must look like a version number, e.g. "2.8.4", "2.9.0-beta-2", "2.5.0-RC1". */
+    private static final Pattern VERSION_HEADING_PATTERN =
+            Pattern.compile("\\d+\\.\\d+\\.\\d+.*");
 
     private final Main.Options options;
 
@@ -83,23 +94,21 @@ public class StableUpdater {
             return;
         }
 
+        List<ReleaseEntry> history = fetchVersionHistory(client);
+
         StablePack multiMcPack = null;
         StablePack serverPack = null;
 
         if (needsClientPack) {
-            multiMcPack = findLatestStablePack(client,
-                    "client",
-                    MULTI_MC_BASE + "?raw",
-                    MULTI_MC_STABLE_PATTERN,
-                    MULTI_MC_BASE);
+            ReleaseEntry entry = selectRelease(history, true, false);
+            multiMcPack = new StablePack(entry.version(), fileNameFromUrl(entry.prismJava17Url()), entry.prismJava17Url());
+            log.info("Selected client stable pack: version {} ({})", multiMcPack.version(), multiMcPack.url());
         }
 
         if (needsServerPack) {
-            serverPack = findLatestStablePack(client,
-                    "server",
-                    SERVER_PACKS_BASE + "?raw",
-                    SERVER_STABLE_PATTERN,
-                    SERVER_PACKS_BASE);
+            ReleaseEntry entry = selectRelease(history, false, true);
+            serverPack = new StablePack(entry.version(), fileNameFromUrl(entry.serverJava17Url()), entry.serverJava17Url());
+            log.info("Selected server stable pack: version {} ({})", serverPack.version(), serverPack.url());
         }
 
         Path multiMcRoot = null;
@@ -177,46 +186,130 @@ public class StableUpdater {
     private record StablePack(String version, String fileName, String url) {
     }
 
-    private StablePack findLatestStablePack(HttpClient client,
-                                            String label,
-                                            String indexUrl,
-                                            Pattern pattern,
-                                            String baseUrl) throws IOException, InterruptedException {
-        log.info("Querying latest {} stable pack from {}", label, indexUrl);
+    /**
+     * A single release entry parsed from the GTNH version history page.
+     * {@code prismJava17Url}/{@code serverJava17Url} are {@code null} when that pack type
+     * wasn't published for this version (e.g. the "April fools 2025" novelty entry).
+     */
+    private record ReleaseEntry(String version, boolean stable, String prismJava17Url, String serverJava17Url) {
+    }
+
+    /**
+     * Fetches and parses https://www.gtnewhorizons.com/version-history/, returning all release
+     * entries in the page's newest-first order.
+     */
+    private List<ReleaseEntry> fetchVersionHistory(HttpClient client) throws IOException, InterruptedException {
+        log.info("Querying GTNH version history from {}", VERSION_HISTORY_URL);
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(indexUrl))
+                .uri(URI.create(VERSION_HISTORY_URL))
                 .GET()
                 .build();
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() != 200) {
-            throw new IOException("Failed to fetch " + label + " pack index " + indexUrl + " (HTTP " + response.statusCode() + ")");
+            throw new IOException("Failed to fetch version history " + VERSION_HISTORY_URL + " (HTTP " + response.statusCode() + ")");
         }
 
-        String body = response.body();
-        Matcher matcher = pattern.matcher(body);
+        Document doc = Jsoup.parse(response.body(), VERSION_HISTORY_URL);
 
-        String bestVersion = null;
-        String bestFile = null;
+        // Each release's version number is rendered as a heading span; walk from one heading to the
+        // next (in document order) to scope the download-link search to that release's card.
+        Elements headings = doc.select("span.font-semibold").stream()
+                .filter(e -> VERSION_HEADING_PATTERN.matcher(e.text().trim()).matches())
+                .collect(Collectors.toCollection(Elements::new));
+        List<ReleaseEntry> entries = new ArrayList<>();
 
-        while (matcher.find()) {
-            String version = matcher.group(1);
-            String fileName = matcher.group(0);
+        for (int i = 0; i < headings.size(); i++) {
+            Element heading = headings.get(i);
+            String version = heading.text().trim();
 
-            if (bestVersion == null ||
-                    new DefaultArtifactVersion(version).compareTo(new DefaultArtifactVersion(bestVersion)) > 0) {
-                bestVersion = version;
-                bestFile = fileName;
+            Element tagSpan = heading.nextElementSibling();
+            boolean stable = tagSpan != null && tagSpan.text().trim().equalsIgnoreCase("Stable release");
+
+            Elements scopedLinks = findReleaseCard(heading).select("a[href]");
+
+            String prismUrl = findFirstMatchingHref(scopedLinks, MULTI_MC_JAVA17_PATTERN);
+            String serverUrl = findFirstMatchingHref(scopedLinks, SERVER_JAVA17_PATTERN);
+
+            entries.add(new ReleaseEntry(version, stable, prismUrl, serverUrl));
+        }
+
+        if (entries.isEmpty()) {
+            throw new IOException("Could not find any release entries on " + VERSION_HISTORY_URL + "; the page layout may have changed.");
+        }
+
+        log.info("Parsed {} release entries from version history (latest: {})", entries.size(), entries.get(0).version());
+        return entries;
+    }
+
+    /**
+     * Returns all {@code <a>} elements in document order between {@code start} (exclusive) and
+     * {@code end} (exclusive, or end of document if {@code null}).
+     */
+    /**
+     * Walks up from a version heading span to the smallest ancestor element that contains that
+     * release's download links, so link lookups don't spill over into other release cards.
+     */
+    private Element findReleaseCard(Element heading) {
+        Element card = heading;
+        while (card.parent() != null && card.select("a[href*=downloads.gtnewhorizons.com]").isEmpty()) {
+            card = card.parent();
+        }
+        return card;
+    }
+
+    private String findFirstMatchingHref(Elements links, Pattern pattern) {
+        for (Element a : links) {
+            String href = a.absUrl("href");
+            if (pattern.matcher(href).find()) {
+                return href;
             }
         }
+        return null;
+    }
 
-        if (bestVersion == null || bestFile == null) {
-            throw new IOException("Could not determine latest stable " + label + " pack from " + indexUrl);
+    private String fileNameFromUrl(String url) {
+        int idx = url.lastIndexOf('/');
+        return idx >= 0 ? url.substring(idx + 1) : url;
+    }
+
+    /**
+     * Picks the release to use for a client and/or server pack, honouring {@code --stable-version}
+     * (exact pin) and {@code --beta} (allow non-"Stable release" entries) from the CLI options.
+     */
+    private ReleaseEntry selectRelease(List<ReleaseEntry> history, boolean needClient, boolean needServer) throws IOException {
+        if (options.stableVersion != null && !options.stableVersion.isBlank()) {
+            String pinned = options.stableVersion.trim();
+            ReleaseEntry match = history.stream()
+                    .filter(e -> e.version().equalsIgnoreCase(pinned))
+                    .findFirst()
+                    .orElseThrow(() -> new IOException(
+                            "Version '" + pinned + "' was not found on " + VERSION_HISTORY_URL));
+
+            if (needClient && match.prismJava17Url() == null) {
+                throw new IOException("Version '" + pinned + "' does not have a Prism/MultiMC Java 17+ download available.");
+            }
+            if (needServer && match.serverJava17Url() == null) {
+                throw new IOException("Version '" + pinned + "' does not have a Server Java 17+ download available.");
+            }
+            return match;
         }
 
-        String url = baseUrl + bestFile;
-        log.info("Latest {} stable detected: version {} ({})", label, bestVersion, url);
-        return new StablePack(bestVersion, bestFile, url);
+        for (ReleaseEntry entry : history) {
+            if (!options.beta && !entry.stable()) {
+                continue;
+            }
+            if (needClient && entry.prismJava17Url() == null) {
+                continue;
+            }
+            if (needServer && entry.serverJava17Url() == null) {
+                continue;
+            }
+            return entry;
+        }
+
+        throw new IOException("Could not find a" + (options.beta ? "ny" : " stable") + " release on " + VERSION_HISTORY_URL
+                + " with a Java 17+ download for the requested pack type(s). Try --beta to include beta/RC releases.");
     }
 
     private void downloadIfMissing(HttpClient client, String url, Path target) throws IOException, InterruptedException {

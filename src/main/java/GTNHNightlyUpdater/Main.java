@@ -157,6 +157,22 @@ public class Main {
         })
         protected boolean replace = false;
 
+        @CommandLine.Option(names = {"--beta"}, description = {
+                "For STABLE updates only:",
+                "  - Allow the latest release to be a beta/RC build, not just entries tagged 'Stable release'",
+                "    on the GTNH version history page (https://www.gtnewhorizons.com/version-history/).",
+                "  - Ignored if --stable-version is set."
+        })
+        protected boolean beta = false;
+
+        @CommandLine.Option(names = {"--stable-version"}, description = {
+                "For STABLE updates only:",
+                "  - Pin the update to an exact version from the GTNH version history page",
+                "    (e.g. '2.9.0-beta-2' or '2.8.4'), instead of picking the latest one.",
+                "  - Overrides --beta."
+        })
+        protected String stableVersion = null;
+
         @CommandLine.ArgGroup(exclusive = false, multiplicity = "1..*")
         protected List<Instance> instances;
 
