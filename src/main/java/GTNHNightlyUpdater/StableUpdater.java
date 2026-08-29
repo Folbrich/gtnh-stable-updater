@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
@@ -114,34 +115,36 @@ public class StableUpdater {
             log.info("Selected server stable pack: version {} ({})", serverPack.version(), serverPack.url());
         }
 
+        Path clientExtractDir = null;
         Path multiMcRoot = null;
         if (multiMcPack != null) {
             Path zipPath = cacheDir.resolve(multiMcPack.fileName());
             downloadIfMissing(client, multiMcPack.url(), zipPath, "Client-Pack");
 
             progressListener.onPhase("Entpacke Client-Pack " + multiMcPack.version() + "…");
-            Path extractDir = cacheDir.resolve("client-" + multiMcPack.version());
-            ensureExtracted(zipPath, extractDir);
+            clientExtractDir = cacheDir.resolve("client-" + multiMcPack.version());
+            ensureExtracted(zipPath, clientExtractDir);
 
-            multiMcRoot = findMinecraftRoot(extractDir);
+            multiMcRoot = findMinecraftRoot(clientExtractDir);
             if (multiMcRoot == null) {
-                throw new IOException("Unable to find client .minecraft root in extracted pack at " + extractDir);
+                throw new IOException("Unable to find client .minecraft root in extracted pack at " + clientExtractDir);
             }
             log.info("Detected client pack .minecraft root at {}", multiMcRoot);
         }
 
+        Path serverExtractDir = null;
         Path serverRoot = null;
         if (serverPack != null) {
             Path zipPath = cacheDir.resolve(serverPack.fileName());
             downloadIfMissing(client, serverPack.url(), zipPath, "Server-Pack");
 
             progressListener.onPhase("Entpacke Server-Pack " + serverPack.version() + "…");
-            Path extractDir = cacheDir.resolve("server-" + serverPack.version());
-            ensureExtracted(zipPath, extractDir);
+            serverExtractDir = cacheDir.resolve("server-" + serverPack.version());
+            ensureExtracted(zipPath, serverExtractDir);
 
-            serverRoot = findMinecraftRoot(extractDir);
+            serverRoot = findMinecraftRoot(serverExtractDir);
             if (serverRoot == null) {
-                throw new IOException("Unable to find server root (mods/config) in extracted pack at " + extractDir);
+                throw new IOException("Unable to find server root (mods/config) in extracted pack at " + serverExtractDir);
             }
             log.info("Detected server pack root at {}", serverRoot);
         }
@@ -188,7 +191,104 @@ public class StableUpdater {
             }
         }
 
+        // The zip stays cached (small, lets a re-run of the same version skip the download), but the
+        // extracted pack is easily reproduced from it in seconds and can be several GB uncompressed -
+        // keeping it around after a successful update just wastes disk space. This also sweeps up
+        // leftover "client-<oldVersion>"/"server-<oldVersion>" folders from earlier updates, which
+        // previously accumulated forever since nothing ever cleaned them up.
+        cleanupExtractedPacks(cacheDir);
+        pruneOldZips(cacheDir);
+
         log.info("Stable update complete.");
+    }
+
+    /** How many of the most-recently-downloaded zips to keep per pack type (client/server) before pruning older ones. */
+    private static final int KEPT_ZIP_VERSIONS = 5;
+
+    private void cleanupExtractedPacks(Path cacheDir) {
+        try (var stream = Files.list(cacheDir)) {
+            stream.filter(Files::isDirectory)
+                    .filter(p -> {
+                        String name = p.getFileName().toString();
+                        return name.startsWith("client-") || name.startsWith("server-");
+                    })
+                    .forEach(dir -> {
+                        try {
+                            FileUtils.deleteDirectory(dir.toFile());
+                            log.info("Cleaned up extracted pack cache directory {}", dir);
+                        } catch (IOException e) {
+                            log.warn("Could not clean up extracted pack cache directory {}: {}", dir, e.getMessage());
+                        }
+                    });
+        } catch (IOException e) {
+            log.warn("Could not scan cache directory {} for cleanup: {}", cacheDir, e.getMessage());
+        }
+    }
+
+    /**
+     * Keeps only the {@value #KEPT_ZIP_VERSIONS} most recently downloaded zips per pack type
+     * (client/server), deleting older ones so the cache doesn't grow forever across many updates.
+     * Recency is by file modification time, which download always refreshes.
+     */
+    private void pruneOldZips(Path cacheDir) {
+        try (var stream = Files.list(cacheDir)) {
+            List<Path> zips = stream.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().endsWith(".zip"))
+                    .collect(Collectors.toList());
+
+            List<Path> serverZips = zips.stream().filter(p -> p.getFileName().toString().contains("_Server_")).collect(Collectors.toList());
+            List<Path> clientZips = zips.stream().filter(p -> !p.getFileName().toString().contains("_Server_")).collect(Collectors.toList());
+
+            pruneKeepingNewest(clientZips);
+            pruneKeepingNewest(serverZips);
+        } catch (IOException e) {
+            log.warn("Could not scan cache directory {} for zip pruning: {}", cacheDir, e.getMessage());
+        }
+    }
+
+    private void pruneKeepingNewest(List<Path> zips) {
+        if (zips.size() <= KEPT_ZIP_VERSIONS) {
+            return;
+        }
+        zips.stream()
+                .sorted(Comparator.comparing(this::lastModifiedOrEpoch).reversed())
+                .skip(KEPT_ZIP_VERSIONS)
+                .forEach(p -> {
+                    try {
+                        Files.delete(p);
+                        log.info("Pruned old cached pack zip {}", p);
+                    } catch (IOException e) {
+                        log.warn("Could not prune old cached pack zip {}: {}", p, e.getMessage());
+                    }
+                });
+    }
+
+    private java.nio.file.attribute.FileTime lastModifiedOrEpoch(Path p) {
+        try {
+            return Files.getLastModifiedTime(p);
+        } catch (IOException e) {
+            return java.nio.file.attribute.FileTime.fromMillis(0);
+        }
+    }
+
+    /**
+     * Wipes all cached stable pack downloads/extractions (everything {@link #cleanupExtractedPacks}
+     * and {@link #pruneOldZips} would otherwise leave behind) - used by the GUI's manual "Clear cache"
+     * button. Leaves unrelated files in {@code cacheDir} (e.g. GUI settings) untouched.
+     */
+    public static void clearCache(Path cacheDir) throws IOException {
+        try (var stream = Files.list(cacheDir)) {
+            for (Path p : stream.collect(Collectors.toList())) {
+                String name = p.getFileName().toString();
+                boolean isPackDir = Files.isDirectory(p) && (name.startsWith("client-") || name.startsWith("server-"));
+                boolean isPackZip = Files.isRegularFile(p) && name.endsWith(".zip");
+                if (isPackDir) {
+                    FileUtils.deleteDirectory(p.toFile());
+                } else if (isPackZip) {
+                    Files.delete(p);
+                }
+            }
+        }
     }
 
     private record StablePack(String version, String fileName, String url) {
@@ -402,7 +502,15 @@ public class StableUpdater {
 
         log.info("Extracting {} into {}", zipPath, extractDir);
         Files.createDirectories(extractDir);
-        extractZip(zipPath, extractDir);
+        try {
+            extractZip(zipPath, extractDir);
+        } catch (IOException | RuntimeException e) {
+            // Don't leave a half-extracted directory behind - ensureExtracted() would otherwise
+            // see it exists on the next run and skip re-extraction forever.
+            log.warn("Extraction of {} failed, cleaning up partial output at {}", zipPath, extractDir);
+            FileUtils.deleteDirectory(extractDir.toFile());
+            throw e;
+        }
     }
 
     /**
@@ -429,21 +537,33 @@ public class StableUpdater {
         // etc.), so they must be backed up to temp files before the overwrite and restored afterward.
         java.util.Map<String, Path> customConfigBackups = backupSelectedCustomConfigs(instanceDir);
 
-        // 1) Replace inside .minecraft: mods, config, serverutilities, scripts, resources
-        copyDirectoryFromPack(packMinecraftRoot, instanceDir, "mods");
-        copyDirectoryFromPack(packMinecraftRoot, instanceDir, "config");
-        copyDirectoryFromPack(packMinecraftRoot, instanceDir, "serverutilities");
-        copyDirectoryFromPack(packMinecraftRoot, instanceDir, "scripts");
-        copyDirectoryFromPack(packMinecraftRoot, instanceDir, "resources");
+        try {
+            // 1) Replace inside .minecraft: mods, config, serverutilities, scripts, resources
+            copyDirectoryFromPack(packMinecraftRoot, instanceDir, "mods");
+            copyDirectoryFromPack(packMinecraftRoot, instanceDir, "config");
+            copyDirectoryFromPack(packMinecraftRoot, instanceDir, "serverutilities");
+            copyDirectoryFromPack(packMinecraftRoot, instanceDir, "scripts");
+            copyDirectoryFromPack(packMinecraftRoot, instanceDir, "resources");
 
-        // 2) If using Java 17+, replace in instance root (alongside .minecraft): libraries, patches, mmc-pack.json
-        Path packInstanceRoot = packMinecraftRoot.getParent();
-        Path instanceRoot = instanceDir.getParent();
-        if (packInstanceRoot != null && instanceRoot != null) {
-            copyDirectoryFromPack(packInstanceRoot, instanceRoot, "libraries");
-            copyDirectoryFromPack(packInstanceRoot, instanceRoot, "patches");
-            copyFileFromPack(packInstanceRoot, instanceRoot, "mmc-pack.json");
-            invalidatePrismPackCache(instanceRoot);
+            // 2) If using Java 17+, replace in instance root (alongside .minecraft): libraries, patches, mmc-pack.json
+            Path packInstanceRoot = packMinecraftRoot.getParent();
+            Path instanceRoot = instanceDir.getParent();
+            if (packInstanceRoot != null && instanceRoot != null) {
+                copyDirectoryFromPack(packInstanceRoot, instanceRoot, "libraries");
+                copyDirectoryFromPack(packInstanceRoot, instanceRoot, "patches");
+                copyFileFromPack(packInstanceRoot, instanceRoot, "mmc-pack.json");
+                invalidatePrismPackCache(instanceRoot);
+            }
+        } catch (IOException | RuntimeException e) {
+            // There's no transactional swap here - whichever directories were already replaced above
+            // stay replaced. Custom config backups (if any) aren't restored either, since we can't tell
+            // which target directories are in a consistent state. Surface this clearly so the user
+            // knows to re-run rather than assume the instance is intact.
+            log.error("Update failed partway through replacing instance files at {}. The instance may be "
+                    + "left in a partially-updated state (some of mods/config/serverutilities/scripts/resources/"
+                    + "libraries/patches/mmc-pack.json may already be replaced while others are not). "
+                    + "Re-running the update is recommended.", instanceDir, e);
+            throw e;
         }
 
         restoreSelectedCustomConfigs(instanceDir, customConfigBackups);

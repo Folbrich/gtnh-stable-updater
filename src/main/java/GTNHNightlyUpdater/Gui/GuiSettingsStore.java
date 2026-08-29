@@ -33,6 +33,8 @@ public final class GuiSettingsStore {
             String json = Files.readString(file, StandardCharsets.UTF_8);
             return GSON.fromJson(json, GuiSettings.class);
         } catch (IOException | RuntimeException e) {
+            // Deliberately broad: a corrupt/tampered settings file should never block the GUI from
+            // starting - fall back to defaults rather than tightening this catch.
             log.warn("Could not load saved GUI settings, starting with defaults: {}", e.getMessage());
             return null;
         }

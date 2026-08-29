@@ -6,17 +6,48 @@ import org.apache.commons.io.FileUtils;
 import java.io.File;
 import java.io.IOException;
 import java.util.Scanner;
+import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
 
 @Log4j2(topic = "GTNHNightlyUpdater")
 public class ConfigUpdater {
     static final String CONFIG_REPO = "https://github.com/GTNewHorizons/GT-New-Horizons-Modpack";
+
+    // Manifests are fetched over the network; a tag/branch value must not be able to smuggle
+    // git options (e.g. "--upload-pack=...") into ProcessBuilder args, so only allow the
+    // characters valid in a git ref name.
+    private static final Pattern TAG_PATTERN = Pattern.compile("^[\\w.\\-/]+$");
+
     private final File minecraftDir;
     private final String configTag;
-
+    private final BooleanSupplier confirmCallback;
 
     ConfigUpdater(File minecraftDir, String configTag) {
+        this(minecraftDir, configTag, ConfigUpdater::confirmOnConsole);
+    }
+
+    ConfigUpdater(File minecraftDir, String configTag, BooleanSupplier confirmCallback) {
+        if (configTag != null && !TAG_PATTERN.matcher(configTag).matches()) {
+            throw new IllegalArgumentException("Invalid config tag/branch: '" + configTag + "'");
+        }
         this.minecraftDir = minecraftDir;
         this.configTag = configTag;
+        this.confirmCallback = confirmCallback;
+    }
+
+    private static boolean confirmOnConsole() {
+        Scanner scanner = new Scanner(System.in);
+        while (true) {
+            System.out.println("Press 'y' to confirm");
+            // dev note: there is a bug in intellij where the console returns without user input
+            String input = scanner.nextLine();
+
+            if (input.equalsIgnoreCase("y")) {
+                return true;
+            } else {
+                System.out.println("Invalid input. Please try again.");
+            }
+        }
     }
 
     public void run() throws IOException {
@@ -33,18 +64,8 @@ public class ConfigUpdater {
         // Init repo if needed
         if (initializeGitRepository(packConfigsDir)) {
             System.out.printf("WARNING: In order to have proper tracking of configs, your configs will be replaced with the latest from [%s [%s]]%n", CONFIG_REPO, configTag);
-            Scanner scanner = new Scanner(System.in);
-            while (true) {
-                System.out.println("Press 'y' to confirm");
-                // dev note: there is a bug in intellij where the console returns without user input
-                String input = scanner.nextLine();
-                // String input = "y";
-
-                if (input.equalsIgnoreCase("y")) {
-                    break;
-                } else {
-                    System.out.println("Invalid input. Please try again.");
-                }
+            if (!confirmCallback.getAsBoolean()) {
+                throw new IOException("Config update was not confirmed; aborting.");
             }
         } else {
             // Copy current player's configs to .pack_configs/config
@@ -77,10 +98,15 @@ public class ConfigUpdater {
             runCommand("git", "-C", configDirectory.getAbsolutePath(), "config", "--local", "user.name", "User");
             runCommand("git", "-C", configDirectory.getAbsolutePath(), "config", "--local", "user.email", "fakeemail@example.com");
             runCommand("git", "-C", configDirectory.getAbsolutePath(), "checkout", "-b", "local");
-            File dest = new File(minecraftDir, "config_backup_updater");
-            deleteExistingFiles(dest);
-            FileUtils.copyDirectory(new File(minecraftDir, "config"), dest);
-            log.info("Backed up original config to {}", dest);
+            File existingConfig = new File(minecraftDir, "config");
+            if (existingConfig.exists()) {
+                File dest = new File(minecraftDir, "config_backup_updater");
+                deleteExistingFiles(dest);
+                FileUtils.copyDirectory(existingConfig, dest);
+                log.info("Backed up original config to {}", dest);
+            } else {
+                log.info("No existing config dir to back up (fresh instance).");
+            }
             return true;
         }
 
@@ -90,12 +116,15 @@ public class ConfigUpdater {
     private void deleteExistingFiles(File directory) {
         log.debug("Deleting [{}]", directory);
         if (directory.exists()) {
-            for (File file : directory.listFiles()) {
-                if (file.isDirectory()) {
-                    deleteExistingFiles(file);
-                    file.delete();
-                } else {
-                    file.delete();
+            File[] files = directory.listFiles();
+            if (files != null) {
+                for (File file : files) {
+                    if (file.isDirectory()) {
+                        deleteExistingFiles(file);
+                        file.delete();
+                    } else {
+                        file.delete();
+                    }
                 }
             }
             directory.mkdirs(); // Re-create the directory

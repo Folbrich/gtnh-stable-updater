@@ -39,6 +39,7 @@ import java.util.zip.ZipInputStream;
 @Log4j2(topic = "GTNHNightlyUpdater")
 public class Updater {
     private static final int KEEP_CACHED_FILES_COUNT = 10;
+    private static final String NEXUS_SEARCH_BASE = "https://nexus.gtnewhorizons.com/service/rest/v1/search/assets";
 
     private final Main.Options options;
 
@@ -64,7 +65,7 @@ public class Updater {
         log.info("Updating modpack jars");
 
         val keptMods = new TreeSet<String>();
-        var mods = assets.getMods();
+        var mods = new ArrayList<>(assets.getMods());
         mods.sort(Comparator.comparing(a -> a.getName().toLowerCase()));
         for (val mod : mods.reversed()) {
             if (mod.getVersions() == null || mod.getVersions().isEmpty()) {
@@ -161,9 +162,13 @@ public class Updater {
                 }
             }
 
-            // delete non-matching versions to handle local builds (usually -pre, but not name changes)
-            Pattern versionPattern = Pattern.compile(escapeQuotes(newModFileName).replace(escapeQuotes(modVersionToUse.getVersion()), ".*"), Pattern.CASE_INSENSITIVE);
-            Pattern versionPattern_OldName = Pattern.compile(escapeQuotes(modVersionToUse.getGithubName()).replace(escapeQuotes(modVersionToUse.getVersion()), ".*"), Pattern.CASE_INSENSITIVE);
+            // delete non-matching versions to handle local builds (usually -pre, but not name changes).
+            // Note: if the version string doesn't literally occur in the filename, this degenerates to
+            // an exact-match pattern; the exact-name cleanup above still handles that common case.
+            // (Pattern.quote can't be used here since its \Q..\E wrapping doesn't compose under
+            // string substitution the way per-character regex escaping does.)
+            Pattern versionPattern = Pattern.compile(regexEscape(newModFileName).replace(regexEscape(modVersionToUse.getVersion()), ".*"), Pattern.CASE_INSENSITIVE);
+            Pattern versionPattern_OldName = Pattern.compile(regexEscape(modVersionToUse.getGithubName()).replace(regexEscape(modVersionToUse.getVersion()), ".*"), Pattern.CASE_INSENSITIVE);
 
             for (Iterator<Map.Entry<String, Path>> iterator = packMods.entrySet().iterator(); iterator.hasNext(); ) {
                 Map.Entry<String, Path> entry = iterator.next();
@@ -309,7 +314,7 @@ public class Updater {
                 Files.createDirectory(targetPath.getParent());
             }
 
-            var cacheFiles = new File(targetPath.getParent().toString()).listFiles();
+            var cacheFiles = targetPath.getParent().toFile().listFiles();
             if (cacheFiles != null && cacheFiles.length > KEEP_CACHED_FILES_COUNT) {
                 log.info("\t[{}] Cleaning cache", mod.getName());
                 Arrays.sort(cacheFiles, Comparator.comparingLong(File::lastModified));
@@ -345,7 +350,7 @@ public class Updater {
             // force maven download for private repos
             if (mod.isPrivate()) {
                 downloadURL = String.format(
-                        "https://nexus.gtnewhorizons.com/service/rest/v1/search/assets/download?repository=public&group=com.github.GTNewHorizons&name=%s&maven.extension=jar&maven.classifier&version=%s",
+                        NEXUS_SEARCH_BASE + "/download?repository=public&group=com.github.GTNewHorizons&name=%s&maven.extension=jar&maven.classifier&version=%s",
                         mod.getName(),
                         modVersionToUse.getVersion()
                 );
@@ -358,7 +363,7 @@ public class Updater {
                 log.warn("\tExpanding maven search");
                 if (mod.getSource() == null) {
                     downloadURL = String.format(
-                            "https://nexus.gtnewhorizons.com/service/rest/v1/search/assets/download?repository=public&name=%s&maven.extension=jar&maven.classifier&version=%s",
+                            NEXUS_SEARCH_BASE + "/download?repository=public&name=%s&maven.extension=jar&maven.classifier&version=%s",
                             mod.getName(),
                             modVersionToUse.getVersion()
                     );
@@ -389,7 +394,7 @@ public class Updater {
             targetPath = targetPath.resolveSibling(String.format("%s-%s-multimc.zip", mod.getName(), modVersionToUse.getVersion()));
             if (!Files.exists(targetPath)) {
                 downloadURL = String.format(
-                        "https://nexus.gtnewhorizons.com/service/rest/v1/search/assets/download?repository=public&name=%s&maven.extension=zip&maven.classifier=multimc&version=%s",
+                        NEXUS_SEARCH_BASE + "/download?repository=public&name=%s&maven.extension=zip&maven.classifier=multimc&version=%s",
                         mod.getName(),
                         modVersionToUse.getVersion()
                 );
@@ -403,7 +408,7 @@ public class Updater {
             targetPath = targetPath.resolveSibling(String.format("%s-%s-forgePatches.jar", mod.getName(), modVersionToUse.getVersion()));
             if (!Files.exists(targetPath)) {
                 downloadURL = String.format(
-                        "https://nexus.gtnewhorizons.com/service/rest/v1/search/assets/download?repository=public&name=%s&maven.extension=jar&maven.classifier=forgePatches&version=%s",
+                        NEXUS_SEARCH_BASE + "/download?repository=public&name=%s&maven.extension=jar&maven.classifier=forgePatches&version=%s",
                         mod.getName(),
                         modVersionToUse.getVersion()
                 );
@@ -416,6 +421,9 @@ public class Updater {
         }
     }
 
+    // Note: only Content-Length is verified here. The DreamAssemblerXXL manifest doesn't currently
+    // publish per-file hashes, so full checksum/signature verification of downloaded jars isn't
+    // possible yet - follow-up if/when the manifest starts publishing hashes.
     private static byte[] downloadFile(String downloadURL, HttpClient client) throws IOException, InterruptedException {
         val request = HttpRequest.newBuilder()
                 .uri(URI.create(downloadURL))
@@ -425,7 +433,13 @@ public class Updater {
         if (!(response.statusCode() == 200 || response.statusCode() == 302)) {
             return null;
         }
-        return response.body();
+        byte[] body = response.body();
+        val expectedLength = response.headers().firstValueAsLong("Content-Length");
+        if (expectedLength.isPresent() && expectedLength.getAsLong() != body.length) {
+            log.warn("\tDownload size mismatch for {}: expected {} bytes, got {} bytes", downloadURL, expectedLength.getAsLong(), body.length);
+            return null;
+        }
+        return body;
     }
 
     void updateModsFromMaven(List<Assets.Mod> mods) throws IOException, InterruptedException {
@@ -441,7 +455,7 @@ public class Updater {
             log.info("\t{}", mod.getName());
 
             String url = String.format(
-                    "https://nexus.gtnewhorizons.com/service/rest/v1/search/assets?&sort=version&repository=public&name=%s&maven.extension=jar&maven.classifier",
+                    NEXUS_SEARCH_BASE + "?&sort=version&repository=public&name=%s&maven.extension=jar&maven.classifier",
                     mod.getName()
             );
             var req = HttpRequest.newBuilder()
@@ -505,7 +519,8 @@ public class Updater {
                 mod.getVersions().sort(Comparator.comparing(v -> new DefaultArtifactVersion(((Assets.Version) v).getVersion())).reversed());
 
                 mod.setLatestVersion(options.targetManifest == Main.Options.TargetManifest.DAILY ?
-                        mod.getVersions().stream().filter(v -> !v.getVersion().endsWith("-pre")).findFirst().get().getVersion() :
+                        mod.getVersions().stream().filter(v -> !v.getVersion().endsWith("-pre")).findFirst()
+                                .orElseThrow(() -> new IOException("No non-pre version found for " + mod.getName())).getVersion() :
                         mod.getVersions().getFirst().getVersion()
                 );
             }
@@ -586,19 +601,20 @@ public class Updater {
     Map<String, Path> gatherExistingMods(Path minecraftModsDir) throws IOException {
         log.info("Gathering existing mods");
 
-        return Files.list(minecraftModsDir)
-                .filter(path -> path.toString().endsWith(".jar"))
-                .collect(Collectors.toMap(
-                        path -> path.getFileName().toString(),
-                        path -> path,
-                        (existing, replacement) -> existing,
-                        TreeMap::new
-                ));
+        try (var stream = Files.list(minecraftModsDir)) {
+            return stream
+                    .filter(path -> path.toString().endsWith(".jar"))
+                    .collect(Collectors.toMap(
+                            path -> path.getFileName().toString(),
+                            path -> path,
+                            (existing, replacement) -> existing,
+                            TreeMap::new
+                    ));
+        }
     }
 
-    static String escapeChars = "\\.?![]{}()<>*+-=^$|";
-
-    private String escapeQuotes(String str) {
+    /** Per-character regex escape (unlike {@link Pattern#quote}, composes correctly under string substitution). */
+    private static String regexEscape(String str) {
         if (str != null && str.length() > 0) {
             return str.replaceAll("[\\W]", "\\\\$0"); // \W designates non-word characters
         }

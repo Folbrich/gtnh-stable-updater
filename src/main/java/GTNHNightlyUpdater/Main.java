@@ -51,7 +51,7 @@ public class Main {
             val updater = new Updater(options);
             val cacheDir = getCacheDir().resolve("gtnh-nightly-updater");
             if (Files.notExists(cacheDir)) {
-                Files.createDirectory(cacheDir);
+                Files.createDirectories(cacheDir);
             }
             val modExclusions = getModExclusions(cacheDir);
 
@@ -69,7 +69,7 @@ public class Main {
 
             val modCacheDir = cacheDir.resolve("mods");
             if (Files.notExists(modCacheDir)) {
-                Files.createDirectory(modCacheDir);
+                Files.createDirectories(modCacheDir);
             }
             if (Files.exists(localAssets)) {
                 updater.addLocalAssets(assets, localAssets);

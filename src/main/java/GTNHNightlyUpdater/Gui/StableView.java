@@ -12,6 +12,7 @@ import javafx.collections.ObservableList;
 import javafx.concurrent.Task;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
@@ -20,6 +21,7 @@ import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TitledPane;
 import javafx.scene.control.Toggle;
@@ -32,6 +34,9 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
+import javafx.stage.Modality;
+import javafx.stage.Stage;
+import javafx.stage.StageStyle;
 import javafx.stage.Window;
 import lombok.extern.log4j.Log4j2;
 import lombok.val;
@@ -142,11 +147,7 @@ public class StableView {
         if (settings.getCustomConfigFiles() != null && !settings.getCustomConfigFiles().isEmpty()) {
             selectedCustomConfigFiles.clear();
             settings.getCustomConfigFiles().forEach(p -> selectedCustomConfigFiles.add(Path.of(p)));
-            customConfigsFilesLabel.setText(String.format(Messages.get("advanced.customConfigs.selected"),
-                    selectedCustomConfigFiles.size(),
-                    selectedCustomConfigFiles.stream()
-                            .map(p -> p.getFileName().toString())
-                            .collect(Collectors.joining(", "))));
+            updateCustomConfigsLabel();
         }
 
         if ("LATEST_BETA".equals(settings.getVersionSource())) {
@@ -295,14 +296,13 @@ public class StableView {
             FileChooser chooser = new FileChooser();
             chooser.setTitle(Messages.get("advanced.chooseFiles.dialogTitle"));
 
-            Path initialConfigDir = instances.stream()
-                    .filter(row -> row.getSide() == UpdateRequest.Side.CLIENT
-                            && row.getPath() != null && !row.getPath().isBlank())
-                    .map(row -> InstanceValidator.resolveClientMinecraftDir(Path.of(row.getPath())))
-                    .filter(Objects::nonNull)
-                    .map(dir -> dir.resolve("config"))
-                    .filter(Files::isDirectory)
-                    .findFirst()
+            Path initialConfigDir = firstClientMinecraftDir()
+                    .map(dir -> {
+                        Path config = dir.resolve("config");
+                        // Fall back to the instance root itself when it hasn't been updated yet
+                        // (no config/ folder to point into) instead of leaving the OS default.
+                        return Files.isDirectory(config) ? config : dir;
+                    })
                     .orElse(null);
             if (initialConfigDir != null) {
                 chooser.setInitialDirectory(initialConfigDir.toFile());
@@ -320,20 +320,41 @@ public class StableView {
                     selectedCustomConfigFiles.add(path);
                 }
             });
-            customConfigsFilesLabel.setText(selectedCustomConfigFiles.isEmpty()
-                    ? Messages.get("advanced.customConfigs.none")
-                    : String.format(Messages.get("advanced.customConfigs.selected"),
-                            selectedCustomConfigFiles.size(),
-                            selectedCustomConfigFiles.stream()
-                                    .map(p -> p.getFileName().toString())
-                                    .collect(Collectors.joining(", "))));
+            updateCustomConfigsLabel();
         });
 
-        val customConfigsBox = new HBox(8, customConfigsCheck, chooseFilesButton);
+        val clearFilesButton = new Button(Messages.get("advanced.clearFiles"));
+        clearFilesButton.disableProperty().bind(customConfigsCheck.selectedProperty().not());
+        clearFilesButton.setOnAction(e -> {
+            selectedCustomConfigFiles.clear();
+            updateCustomConfigsLabel();
+        });
+
+        customConfigsFilesLabel.disableProperty().bind(customConfigsCheck.selectedProperty().not());
+
+        val customConfigsBox = new HBox(8, customConfigsCheck, chooseFilesButton, clearFilesButton);
         customConfigsBox.setAlignment(Pos.CENTER_LEFT);
 
+        // Options/Saves/Server list/Other data are only read for Migration (see
+        // StableUpdater#copyUserDataForMethod1); Replace in-place doesn't touch them since it only
+        // overwrites mods/config/etc. in place. Custom configs is the only category that applies to
+        // both methods (StableUpdater#backupSelectedCustomConfigs also runs it for Replace), so grey
+        // out the migration-only checkboxes instead of leaving the caption over-promise what happens.
+        val migrationOnlyCheckboxes = new CheckBox[]{optionsCheck, savesCheck, serverListCheck, otherDataCheck};
+        for (CheckBox box : migrationOnlyCheckboxes) {
+            box.disableProperty().bind(replaceRadio.selectedProperty());
+        }
+
+        val clearCacheButton = new Button(Messages.get("advanced.clearCache"));
+        clearCacheButton.getStyleClass().addAll("text-muted", "gtnh-link-button");
+        clearCacheButton.setTooltip(new Tooltip(Messages.get("advanced.clearCache.tooltip")));
+        clearCacheButton.setOnAction(e -> onClearCache(clearCacheButton));
+        val clearCacheRow = new HBox(clearCacheButton);
+        clearCacheRow.setAlignment(Pos.CENTER_RIGHT);
+        clearCacheRow.setPadding(new Insets(4, 0, 0, 0));
+
         val content = new VBox(6, intro, optionsCheck, savesCheck, serverListCheck, otherDataCheck,
-                customConfigsBox, customConfigsFilesLabel, customConfigsWarning);
+                customConfigsBox, customConfigsFilesLabel, customConfigsWarning, clearCacheRow);
         content.setPadding(new Insets(8, 0, 0, 0));
 
         val advancedPane = new TitledPane(Messages.get("advanced.title"), content);
@@ -354,6 +375,96 @@ public class StableView {
         val box = new VBox(10, headerRow, instancesBox);
         box.getStyleClass().add("gtnh-card");
         return box;
+    }
+
+    /** First configured CLIENT instance's resolved {@code .minecraft} dir, if any. */
+    private java.util.Optional<Path> firstClientMinecraftDir() {
+        return instances.stream()
+                .filter(row -> row.getSide() == UpdateRequest.Side.CLIENT
+                        && row.getPath() != null && !row.getPath().isBlank())
+                .map(row -> InstanceValidator.resolveClientMinecraftDir(Path.of(row.getPath())))
+                .filter(Objects::nonNull)
+                .findFirst();
+    }
+
+    /**
+     * Manually wipes cached stable pack downloads/extractions ({@link StableUpdater#clearCache}).
+     * Not something users do often, so it's tucked away as an unobtrusive text button in Advanced
+     * rather than in the main action bar, and always asks for confirmation since it can't be undone
+     * (next update just re-downloads, but that may take a while on a slow connection).
+     */
+    private void onClearCache(Button sourceButton) {
+        Alert confirm = smallIconAlert(Alert.AlertType.CONFIRMATION, Messages.get("advanced.clearCache.confirm"), ButtonType.YES, ButtonType.NO);
+        confirm.setHeaderText(Messages.get("advanced.clearCache"));
+        confirm.showAndWait().filter(bt -> bt == ButtonType.YES).ifPresent(bt -> {
+            ProgressBar progressBar = new ProgressBar();
+            progressBar.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
+            progressBar.setPrefWidth(280);
+            Label progressLabel = new Label(Messages.get("advanced.clearCache.progress"));
+            VBox content = new VBox(8, progressLabel, progressBar);
+            content.setPadding(new Insets(16));
+
+            Stage progress = new Stage(StageStyle.UTILITY);
+            progress.setTitle(Messages.get("advanced.clearCache"));
+            progress.initOwner(sourceButton.getScene().getWindow());
+            progress.initModality(Modality.APPLICATION_MODAL);
+            progress.setResizable(false);
+            progress.setScene(new Scene(content));
+
+            Task<Void> task = new Task<>() {
+                @Override
+                protected Void call() throws Exception {
+                    StableUpdater.clearCache(Main.resolveStableCacheDir());
+                    return null;
+                }
+            };
+            task.setOnSucceeded(e -> {
+                progress.close();
+                smallIconAlert(Alert.AlertType.INFORMATION, Messages.get("advanced.clearCache.success"), ButtonType.OK).showAndWait();
+            });
+            task.setOnFailed(e -> {
+                progress.close();
+                log.warn("Failed to clear cache", task.getException());
+                smallIconAlert(Alert.AlertType.ERROR, String.format(Messages.get("advanced.clearCache.error"), task.getException().getMessage()), ButtonType.OK).showAndWait();
+            });
+
+            Thread thread = new Thread(task, "clear-cache");
+            thread.setDaemon(true);
+            // Show the window first, and only start the background work (and thus the earliest
+            // possible progress.close()) once it's actually on screen - starting the thread eagerly
+            // races a very fast clear (e.g. cache already empty) against the window even appearing,
+            // which left it stuck open forever.
+            progress.show();
+            Platform.runLater(thread::start);
+        });
+    }
+
+    /**
+     * Builds an {@link Alert} with a small icon instead of AtlantaFX's oversized default graphic
+     * (the default is jarringly large for a simple confirm/info popup like cache clearing).
+     */
+    private Alert smallIconAlert(Alert.AlertType type, String content, ButtonType... buttonTypes) {
+        Alert alert = new Alert(type, content == null ? "" : content, buttonTypes);
+        Feather icon = switch (type) {
+            case CONFIRMATION -> Feather.HELP_CIRCLE;
+            case ERROR -> Feather.ALERT_CIRCLE;
+            case WARNING -> Feather.ALERT_TRIANGLE;
+            default -> Feather.INFO;
+        };
+        FontIcon fontIcon = new FontIcon(icon);
+        fontIcon.setIconSize(24);
+        alert.setGraphic(fontIcon);
+        return alert;
+    }
+
+    private void updateCustomConfigsLabel() {
+        customConfigsFilesLabel.setText(selectedCustomConfigFiles.isEmpty()
+                ? Messages.get("advanced.customConfigs.none")
+                : String.format(Messages.get("advanced.customConfigs.selected"),
+                        selectedCustomConfigFiles.size(),
+                        selectedCustomConfigFiles.stream()
+                                .map(p -> p.getFileName().toString())
+                                .collect(Collectors.joining(", "))));
     }
 
     private void addInstanceRow() {
@@ -378,6 +489,24 @@ public class StableView {
         browseButton.setOnAction(e -> {
             DirectoryChooser chooser = new DirectoryChooser();
             chooser.setTitle(Messages.get("instances.browseDialogTitle"));
+
+            // Start from this row's own path if it's already set and still exists, otherwise from
+            // another already-configured instance's folder, so re-browsing doesn't dump you back at
+            // the OS default every time.
+            Path currentPath = row.getPath() == null || row.getPath().isBlank() ? null : Path.of(row.getPath());
+            Path startDir = (currentPath != null && Files.isDirectory(currentPath)) ? currentPath : null;
+            if (startDir == null) {
+                startDir = instances.stream()
+                        .filter(r -> r.getPath() != null && !r.getPath().isBlank())
+                        .map(r -> Path.of(r.getPath()))
+                        .filter(Files::isDirectory)
+                        .findFirst()
+                        .orElse(null);
+            }
+            if (startDir != null) {
+                chooser.setInitialDirectory(startDir.toFile());
+            }
+
             Window window = browseButton.getScene().getWindow();
             val selected = chooser.showDialog(window);
             if (selected == null) {
