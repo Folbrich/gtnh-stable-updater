@@ -1,5 +1,9 @@
 package GTNHNightlyUpdater;
 
+import GTNHNightlyUpdater.Config.InstanceValidator;
+import GTNHNightlyUpdater.Config.UpdateRequest;
+import GTNHNightlyUpdater.Gui.GtnhUpdaterApp;
+import javafx.application.Application;
 import lombok.Getter;
 import lombok.ToString;
 import lombok.extern.log4j.Log4j2;
@@ -16,6 +20,11 @@ import java.util.Set;
 @Log4j2(topic = "GTNHNightlyUpdater-Main")
 public class Main {
     public static void main(String[] args) {
+        if (args.length == 0) {
+            Application.launch(GtnhUpdaterApp.class, args);
+            return;
+        }
+
         val options = new Options();
         try {
             new CommandLine(options)
@@ -24,13 +33,18 @@ public class Main {
 
             // Stable updates use the official GTNH zip packs and a different flow
             if (options.targetManifest == Options.TargetManifest.STABLE) {
-                val cacheDirBase = getCacheDir();
-                val cacheDir = cacheDirBase.resolve("gtnh-stable-updater");
-                if (Files.notExists(cacheDir)) {
-                    Files.createDirectory(cacheDir);
+                val cacheDir = resolveStableCacheDir();
+                if (options.configsOnly) {
+                    log.warn("configsOnly flag is ignored for STABLE updates; performing full pack update as described on the GTNH wiki.");
+                }
+                if (options.updateConfigs) {
+                    log.warn("updateConfigs flag is ignored for STABLE updates; stable packs already contain the correct configs.");
+                }
+                if (options.getLatestRelease) {
+                    log.warn("get-latest flag is not applicable for STABLE; the latest stable zip from downloads.gtnewhorizons.com is always used.");
                 }
                 log.info("Running STABLE updater using official GTNH zip packs");
-                new StableUpdater(options).run(cacheDir);
+                new StableUpdater(toUpdateRequest(options)).run(cacheDir);
                 return;
             }
 
@@ -89,7 +103,30 @@ public class Main {
     }
 
 
-    private static Path getCacheDir() {
+    static UpdateRequest toUpdateRequest(Options options) {
+        val request = UpdateRequest.builder()
+                .replace(options.replace)
+                .beta(options.beta)
+                .stableVersion(options.stableVersion)
+                .instances(options.instances.stream()
+                        .map(i -> UpdateRequest.InstanceTarget.builder()
+                                .minecraftDir(i.config.minecraftDir)
+                                .side(UpdateRequest.Side.valueOf(i.config.side.name()))
+                                .build())
+                        .collect(java.util.stream.Collectors.toList()))
+                .build();
+        return request;
+    }
+
+    public static Path resolveStableCacheDir() throws IOException {
+        val cacheDir = getCacheDir().resolve("gtnh-stable-updater");
+        if (Files.notExists(cacheDir)) {
+            Files.createDirectory(cacheDir);
+        }
+        return cacheDir;
+    }
+
+    public static Path getCacheDir() {
         val osName = System.getProperty("os.name").toLowerCase();
         Path cacheDir;
         if (osName.contains("win")) {
@@ -192,8 +229,9 @@ public class Main {
                 @CommandLine.Option(names = {"-m", "--minecraft"}, required = true, description = "Path to the base minecraft folder to be updated (it contains the mods and config folder).")
                 void setMinecraftDir(String value) {
                     val path = Path.of(value);
-                    if (!Files.exists(path)) {
-                        throw new CommandLine.ParameterException(spec.commandLine(), String.format("Invalid value '%s' for option '--minecraft': path does not exist", path));
+                    val error = InstanceValidator.validateMinecraftDir(path);
+                    if (error != null) {
+                        throw new CommandLine.ParameterException(spec.commandLine(), String.format("Invalid value for option '--minecraft': %s", error));
                     }
                     this.minecraftDir = path;
                 }

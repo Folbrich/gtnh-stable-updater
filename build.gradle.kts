@@ -9,6 +9,7 @@ plugins {
     id("java")
     application
     id("com.palantir.git-version") version "3.0.0"
+    id("org.openjfx.javafxplugin") version "0.1.0"
 }
 
 
@@ -38,6 +39,9 @@ dependencies {
     implementation("org.jsoup:jsoup:1.18.1")
     implementation("info.picocli:picocli:4.7.6")
     annotationProcessor("info.picocli:picocli-codegen:4.7.6")
+    implementation("io.github.mkpaz:atlantafx-base:2.0.1")
+    implementation("org.kordamp.ikonli:ikonli-javafx:12.3.1")
+    implementation("org.kordamp.ikonli:ikonli-feather-pack:12.3.1")
 
     compileOnly("org.projectlombok:lombok:1.18.36")
     annotationProcessor("org.projectlombok:lombok:1.18.36")
@@ -51,6 +55,23 @@ java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
     }
+}
+
+tasks.withType<JavaCompile> {
+    options.encoding = "UTF-8"
+}
+
+tasks.withType<Test> {
+    systemProperty("file.encoding", "UTF-8")
+}
+
+tasks.named<JavaExec>("run") {
+    jvmArgs = listOf("-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8")
+}
+
+javafx {
+    version = "21.0.2"
+    modules = listOf("javafx.controls")
 }
 
 application {
@@ -84,5 +105,63 @@ tasks {
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
         // here zip stuff found in runtimeClasspath:
         from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
+    }
+}
+
+// `jar` (default task) is the "terminal" build: run with CLI args (`java -jar ...jar -M ...`),
+// or double-click/`java -jar` with no args to fall back to the GUI, same as before.
+// `guiJar` is byte-for-byte the same fat jar content, just under a name that makes it obvious
+// which one to double-click for the GUI (no CLI args needed either way — Main.main launches the
+// GUI whenever args is empty).
+val guiJar = tasks.register<Jar>("guiJar") {
+    group = "build"
+    description = "Builds a GUI-labelled copy of the fat jar (double-click friendly; launches the GUI when run with no arguments)."
+    archiveBaseName = "gtnh-stable-updater-gui"
+    manifest {
+        attributes["Main-Class"] = application.mainClass
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from(sourceSets.main.get().output)
+    from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
+}
+
+tasks.named("assemble") {
+    dependsOn(guiJar)
+}
+
+// Best-effort native Windows launcher for the GUI jar, built with the JDK's own `jpackage` tool
+// (bundled since JDK 14, so no extra install needed) as an "app-image" — a self-contained folder
+// with a real .exe inside and its own bundled JRE, no WiX/installer tooling required. This is
+// NOT an installer (no Start Menu entry, no uninstaller) — just a runnable .exe folder.
+tasks.register<Exec>("jpackageGuiExe") {
+    group = "distribution"
+    description = "Packages guiJar into a native Windows .exe app-image via jpackage (no installer, just a runnable folder)."
+    dependsOn(guiJar)
+
+    doFirst {
+        val javaHome = javaToolchains.launcherFor(java.toolchain).get().executablePath.asFile.parentFile.parentFile
+        val jpackageBin = javaHome.resolve("bin").resolve(
+            if (org.gradle.internal.os.OperatingSystem.current().isWindows) "jpackage.exe" else "jpackage"
+        )
+        val destDir = layout.buildDirectory.dir("jpackage").get().asFile
+        delete(destDir)
+        destDir.mkdirs()
+
+        val safeVersion = version.toString().takeWhile { it.isDigit() || it == '.' }
+            .trim('.')
+            .ifBlank { "1.0.0" }
+            .let { v -> if (v.count { c -> c == '.' } < 2) "$v.0.0".split(".").take(3).joinToString(".") else v }
+
+        commandLine(
+            jpackageBin.absolutePath,
+            "--type", "app-image",
+            "--name", "GTNH Stable Updater",
+            "--input", guiJar.get().destinationDirectory.get().asFile.absolutePath,
+            "--main-jar", guiJar.get().archiveFileName.get(),
+            "--main-class", application.mainClass.get(),
+            "--dest", destDir.absolutePath,
+            "--vendor", "Folbrich",
+            "--app-version", safeVersion
+        )
     }
 }
