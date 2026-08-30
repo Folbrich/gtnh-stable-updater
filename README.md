@@ -1,8 +1,8 @@
-# GTNH Nightly / Stable Updater
+# GTNH Stable Updater
 
 A tool for updating the GTNH modpack — with a **GUI** for the common case (stable updates,
-migration, multiple instances) and a **CLI** for scripting / nightly (experimental/daily) updates
-via the GTNH Maven.
+migration, multiple instances) and a **CLI** for scripting stable updates or updating
+nightly/experimental builds via the GTNH Maven.
 
 ---
 
@@ -49,7 +49,8 @@ is no hardcoded or cached version list.
 
 ## CLI
 
-The CLI is for **nightly/experimental** updates and for scripting stable updates without the GUI.
+The CLI scripts stable updates without the GUI, and also covers **nightly/experimental** updates
+via the GTNH Maven. Running the jar with **no arguments** opens the GUI instead.
 
 ### Command-Line Options
 
@@ -67,73 +68,42 @@ The CLI is for **nightly/experimental** updates and for scripting stable updates
 | `-s, --side` | **Required** Specify the side (`CLIENT` or `SERVER`) |
 | `-S, --symlinks` | **Optional - Nightly Only** Use symlinks instead of copying mods (Mac/Linux only) |
 
-Running the jar with **no arguments** opens the GUI instead of the CLI.
-
 ### Example Commands
-
-#### Nightly / Experimental
-
-```bash
-java -jar gtnh-nightly-updater.jar -M DAILY \
-  --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH_Nightly/.minecraft/" \
-  --add -s SERVER -m "/mnt/docker/appdata/minecraft/gtnh/"
-```
 
 #### Stable – Migration (default)
 
 ```bash
-java -jar gtnh-nightly-updater.jar -M STABLE \
+java -jar gtnh-stable-updater.jar -M STABLE \
   --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH/.minecraft/" \
   --add -s SERVER -m "/opt/minecraft/gtnh-server/"
 ```
 
-#### Stable – In-place Replace
+#### Stable – In-place Replace / Latest Beta / Pinned version
 
 ```bash
-java -jar gtnh-nightly-updater.jar -M STABLE --replace \
+java -jar gtnh-stable-updater.jar -M STABLE --replace \
+  --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH/.minecraft/"
+
+java -jar gtnh-stable-updater.jar -M STABLE --replace --beta \
+  --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH/.minecraft/"
+
+java -jar gtnh-stable-updater.jar -M STABLE --replace --stable-version 2.9.0-beta-2 \
   --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH/.minecraft/"
 ```
 
-#### Stable – Latest Beta/RC
+#### Nightly / Experimental
 
 ```bash
-java -jar gtnh-nightly-updater.jar -M STABLE --replace --beta \
-  --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH/.minecraft/"
-```
-
-#### Stable – Pin an exact version
-
-```bash
-java -jar gtnh-nightly-updater.jar -M STABLE --replace --stable-version 2.9.0-beta-2 \
-  --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH/.minecraft/"
+java -jar gtnh-stable-updater.jar -M DAILY \
+  --add -s CLIENT -m "/mnt/games/Minecraft/Instances/GTNH_Nightly/.minecraft/" \
+  --add -s SERVER -m "/mnt/docker/appdata/minecraft/gtnh/"
 ```
 
 ### Configs (Nightly only)
 
-#### WARNING
-
-**The first time you run the configs update, you will be prompted saying that the instance's configs will be replaced with the latest copy for the nightly.**
-
-The first time the configs are updated the following things occur:
-
-- Modpack config repo is cloned to `.minecraft/.updater_pack_configs`
-- A backup of the `.minecraft/config` folder will be copied to `.minecraft/config_backup_updater`  
-  (this only happens the first time)
-- `.minecraft/config` will be deleted
-- `.minecraft/.updater_pack_configs/configs` will be copied to `.minecraft/config`
-
-After that the update process will be:
-
-- Delete `.minecraft/.updater_pack_configs/configs`
-- Copy `.minecraft/config` to `.minecraft/.updater_pack_configs/configs`
-- `git add .`
-- `git commit -m "<auto_message>"`
-- `git fetch`
-- `git merge -x theirs origin/<nightly_config>`
-- `.minecraft/config` will be deleted
-- `.minecraft/.updater_pack_configs/configs` will be copied to `.minecraft/config`
-
-**If there are any merge conflicts, it will stop and notify the user. Those will have to be resolved by hand.**
+Config updates (`-c`/`-C`) diff the modpack's config repo against your instance using a local git
+clone in `.minecraft/.updater_pack_configs`, backing up your existing `config` folder once on the
+first run (`config_backup_updater`). Merge conflicts stop the process and must be resolved by hand.
 
 ---
 
