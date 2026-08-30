@@ -97,8 +97,13 @@ tasks.named<Test>("test") {
     environment("VERSION", "1.0.0")
 }
 
+// There is only one jar: it's a fat jar containing both the CLI and the GUI (JavaFX included).
+// Double-click it (or `java -jar ...jar` with no args) to open the GUI; pass CLI args
+// (`java -jar ...jar -M ...`) to run headless instead. Splitting this into a "lightweight CLI"
+// jar without JavaFX would need separate source sets and isn't worth it for a single-app project.
 tasks {
     withType<Jar> {
+        archiveBaseName = "gtnh-stable-updater"
         manifest {
             attributes["Main-Class"] = application.mainClass
         }
@@ -108,35 +113,14 @@ tasks {
     }
 }
 
-// `jar` (default task) is the "terminal" build: run with CLI args (`java -jar ...jar -M ...`),
-// or double-click/`java -jar` with no args to fall back to the GUI, same as before.
-// `guiJar` is byte-for-byte the same fat jar content, just under a name that makes it obvious
-// which one to double-click for the GUI (no CLI args needed either way — Main.main launches the
-// GUI whenever args is empty).
-val guiJar = tasks.register<Jar>("guiJar") {
-    group = "build"
-    description = "Builds a GUI-labelled copy of the fat jar (double-click friendly; launches the GUI when run with no arguments)."
-    archiveBaseName = "gtnh-stable-updater-gui"
-    manifest {
-        attributes["Main-Class"] = application.mainClass
-    }
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    from(sourceSets.main.get().output)
-    from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
-}
-
-tasks.named("assemble") {
-    dependsOn(guiJar)
-}
-
-// Best-effort native Windows launcher for the GUI jar, built with the JDK's own `jpackage` tool
-// (bundled since JDK 14, so no extra install needed) as an "app-image" — a self-contained folder
-// with a real .exe inside and its own bundled JRE, no WiX/installer tooling required. This is
-// NOT an installer (no Start Menu entry, no uninstaller) — just a runnable .exe folder.
+// Best-effort native Windows launcher, built with the JDK's own `jpackage` tool (bundled since
+// JDK 14, so no extra install needed) as an "app-image" — a self-contained folder with a real
+// .exe inside and its own bundled JRE, no WiX/installer tooling required. This is NOT an
+// installer (no Start Menu entry, no uninstaller) — just a runnable .exe folder.
 tasks.register<Exec>("jpackageGuiExe") {
     group = "distribution"
-    description = "Packages guiJar into a native Windows .exe app-image via jpackage (no installer, just a runnable folder)."
-    dependsOn(guiJar)
+    description = "Packages the jar into a native Windows .exe app-image via jpackage (no installer, just a runnable folder)."
+    dependsOn(tasks.named("jar"))
 
     doFirst {
         val javaHome = javaToolchains.launcherFor(java.toolchain).get().executablePath.asFile.parentFile.parentFile
@@ -156,8 +140,8 @@ tasks.register<Exec>("jpackageGuiExe") {
             jpackageBin.absolutePath,
             "--type", "app-image",
             "--name", "GTNH Stable Updater",
-            "--input", guiJar.get().destinationDirectory.get().asFile.absolutePath,
-            "--main-jar", guiJar.get().archiveFileName.get(),
+            "--input", tasks.jar.get().destinationDirectory.get().asFile.absolutePath,
+            "--main-jar", tasks.jar.get().archiveFileName.get(),
             "--main-class", application.mainClass.get(),
             "--dest", destDir.absolutePath,
             "--vendor", "Folbrich",

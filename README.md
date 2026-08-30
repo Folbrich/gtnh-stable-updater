@@ -25,8 +25,8 @@ in English and German (toggle in the header).
 - **Windows, no Java required:** run `build/jpackage/GTNH Stable Updater/GTNH Stable Updater.exe`
   (see [Building](#building) below to produce it) — a self-contained folder with its own bundled
   Java runtime.
-- **Any OS with Java 21+:** double-click (or `java -jar`) the GUI jar, e.g.
-  `gtnh-stable-updater-gui-<version>.jar`. Launching it with no arguments always opens the GUI.
+- **Any OS with Java 21+:** double-click (or `java -jar`) `gtnh-stable-updater-<version>.jar`.
+  It's the same jar as the CLI — launching it with no arguments always opens the GUI.
 
 ### Update methods
 
@@ -110,8 +110,7 @@ first run (`config_backup_updater`). Merge conflicts stop the process and must b
 ## Building
 
 ```bash
-./gradlew build          # runs tests, builds the terminal jar and the GUI jar (build/libs/)
-./gradlew guiJar         # just the GUI jar
+./gradlew build          # runs tests, builds the single jar (CLI + GUI, build/libs/)
 ./gradlew jpackageGuiExe # native Windows .exe app-image (build/jpackage/), via the JDK's own jpackage
 ./gradlew run            # run from source (GUI, unless args are configured in build.gradle.kts)
 ```
