@@ -22,11 +22,13 @@ in English and German (toggle in the header).
 
 ### Getting it
 
-- **Windows, no Java required:** run `build/jpackage/GTNH Stable Updater/GTNH Stable Updater.exe`
-  (see [Building](#building) below to produce it) — a self-contained folder with its own bundled
-  Java runtime.
-- **Any OS with Java 21+:** double-click (or `java -jar`) `gtnh-stable-updater-<version>.jar`.
-  It's the same jar as the CLI — launching it with no arguments always opens the GUI.
+Grab the latest build from the [Releases page](https://github.com/Folbrich/gtnh-stable-updater/releases):
+
+- **Windows, no Java required:** download and unzip `GTNH-Stable-Updater-<version>-win64.zip`, then
+  run `GTNH Stable Updater.exe`. It's an "app-image" — a self-contained folder with its own bundled
+  Java runtime, not an installer (no Start Menu entry / uninstaller).
+- **Any OS with Java 21+:** download `gtnh-stable-updater-<version>.jar` and double-click (or
+  `java -jar`) it. It's the same jar as the CLI — launching it with no arguments always opens the GUI.
 
 ### Update methods
 
@@ -50,7 +52,9 @@ is no hardcoded or cached version list.
 ## CLI
 
 The CLI scripts stable updates without the GUI, and also covers **nightly/experimental** updates
-via the GTNH Maven. Running the jar with **no arguments** opens the GUI instead.
+via the GTNH Maven. Running the jar with **no arguments** opens the GUI instead. Get the jar from
+the [Releases page](https://github.com/Folbrich/gtnh-stable-updater/releases) (see
+[Getting it](#getting-it) above).
 
 ### Command-Line Options
 
@@ -104,19 +108,6 @@ java -jar gtnh-stable-updater.jar -M DAILY \
 Config updates (`-c`/`-C`) diff the modpack's config repo against your instance using a local git
 clone in `.minecraft/.updater_pack_configs`, backing up your existing `config` folder once on the
 first run (`config_backup_updater`). Merge conflicts stop the process and must be resolved by hand.
-
----
-
-## Building
-
-```bash
-./gradlew build          # runs tests, builds the single jar (CLI + GUI, build/libs/)
-./gradlew jpackageGuiExe # native Windows .exe app-image (build/jpackage/), via the JDK's own jpackage
-./gradlew run            # run from source (GUI, unless args are configured in build.gradle.kts)
-```
-
-The `.exe` is an "app-image": a self-contained folder with a bundled Java runtime, not an installer
-(no Start Menu entry / uninstaller).
 
 ---
 
